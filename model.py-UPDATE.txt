@@ -1,0 +1,107 @@
+import tensorflow as tf
+from tensorflow.keras import layers, models, regularizers
+
+# 1. Gradient Reversal Layer for Adversarial Domain Adaptation
+class GradientReversalLayer(layers.Layer):
+    def __init__(self, hp_lambda=1.0, **kwargs):
+        super(GradientReversalLayer, self).__init__(**kwargs)
+        self.hp_lambda = hp_lambda
+
+    @tf.custom_gradient
+    def reverse_gradient(self, x):
+        def grad(dy):
+            return -dy * self.hp_lambda
+        return x, grad
+
+    def call(self, x):
+        return self.reverse_gradient(x)
+
+# 2. Attention Mechanism for the Bi-LSTM Branch (Section 3.4b)
+class AttentionLayer(layers.Layer):
+    def __init__(self, units, **kwargs):
+        super(AttentionLayer, self).__init__(**kwargs)
+        self.W = layers.Dense(units)
+        self.V = layers.Dense(1)
+
+    def call(self, inputs):
+        # inputs shape: (batch_size, time_steps, feature_dim)
+        score = tf.nn.tanh(self.W(inputs))
+        attention_weights = tf.nn.softmax(self.V(score), axis=1)
+        context_vector = attention_weights * inputs
+        context_vector = tf.reduce_sum(context_vector, axis=1)
+        return context_vector
+
+def build_multimodal_model(input_shapes):
+    l2_reg = regularizers.l2(1e-5) # Section 3.4b: L2 Weight Decay
+    
+    # --- A. ACOUSTIC BRANCH (CNN) - Based on Table 4 ---
+    audio_input = layers.Input(shape=input_shapes['audio'], name="audio_input")
+    x_a = layers.Conv2D(32, (3, 3), padding='same', activation='relu', kernel_regularizer=l2_reg)(audio_input)
+    x_a = layers.MaxPooling2D((2, 2))(x_a)
+    x_a = layers.Conv2D(64, (3, 3), padding='same', activation='relu', kernel_regularizer=l2_reg)(x_a)
+    x_a = layers.MaxPooling2D((2, 2))(x_a)
+    x_a = layers.Conv2D(128, (3, 3), padding='same', activation='relu', kernel_regularizer=l2_reg)(x_a)
+    audio_embedding = layers.GlobalAveragePooling2D(name="audio_embedding")(x_a) # Dim: 128
+
+    # --- B. PHYSIOLOGICAL BRANCH (Bi-LSTM) - Based on Table 4 ---
+    physio_input = layers.Input(shape=input_shapes['physio'], name="physio_input")
+    # First Bi-LSTM (128 units)
+    x_p = layers.Bidirectional(layers.LSTM(128, return_sequences=True, kernel_regularizer=l2_reg))(physio_input)
+    # Second Bi-LSTM (64 units)
+    x_p = layers.Bidirectional(layers.LSTM(64, return_sequences=True, kernel_regularizer=l2_reg))(x_p)
+    # Attention weighted summary (Section 3.4b)
+    physio_embedding = AttentionLayer(128, name="physio_attention")(x_p) # Dim: 128
+
+    # --- C. STATIC BRANCH (MLP) - Based on Table 4 ---
+    static_input = layers.Input(shape=input_shapes['static'], name="static_input")
+    x_s = layers.Dense(32, activation='relu', kernel_regularizer=l2_reg)(static_input)
+    x_s = layers.Dropout(0.2)(x_s)
+    static_embedding = layers.Dense(32, activation='relu', name="static_embedding")(x_s) # Dim: 32
+
+    # --- D. MULTIMODAL FUSION ---
+    # Concatenated dimension: 128 (Audio) + 128 (Physio) + 32 (Static) = 288
+    fused = layers.Concatenate(name="fusion_layer")([audio_embedding, physio_embedding, static_embedding])
+    
+    # Joint Reasoning
+    x = layers.Dense(128, activation='relu', kernel_regularizer=l2_reg)(fused)
+    x = layers.Dropout(0.3)(x)
+    
+    # Task Output: Pneumonia Detection
+    classification_out = layers.Dense(2, activation='softmax', name="classification_output")(x)
+
+    # --- E. DOMAIN ADAPTATION BRANCH ---
+    grl = GradientReversalLayer(hp_lambda=1.0)(fused)
+    domain_out = layers.Dense(2, activation='softmax', name="domain_output")(grl)
+
+    # Construct Model
+    model = models.Model(inputs=[audio_input, physio_input, static_input], 
+                         outputs=[classification_out, domain_out])
+
+    # Section 4.1: Cosine Annealing with Warm Restarts
+    lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+        initial_learning_rate=1e-4,
+        first_decay_steps=20 * (10800 // 32), # 20 epochs * steps_per_epoch
+        t_mul=1.0, 
+        m_mul=1.0
+    )
+    
+    optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+
+    model.compile(optimizer=optimizer,
+                  loss={'classification_output': 'categorical_crossentropy', 
+                        'domain_output': 'categorical_crossentropy'},
+                  loss_weights={'classification_output': 1.0, 'domain_output': 0.5},
+                  metrics=['accuracy'])
+    
+    return model
+
+if __name__ == "__main__":
+    # Input definitions matching Section 3.2 and Table 4
+    shapes = {
+        'audio': (128, 128, 1), # Mel-spectrogram
+        'physio': (300, 10),    # 300 timesteps, 10 sensors
+        'static': (8,)          # Age, Sex, BMI, etc.
+    }
+    
+    pneumonia_model = build_multimodal_model(shapes)
+    pneumonia_model.summary()
