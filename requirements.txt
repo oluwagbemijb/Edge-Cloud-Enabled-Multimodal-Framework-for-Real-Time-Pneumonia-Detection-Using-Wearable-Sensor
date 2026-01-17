@@ -1,0 +1,27 @@
+# --- Core Deep Learning Framework (Section 4.1) ---
+tensorflow==2.12.0
+keras==2.12.0
+
+# --- Explainable AI & Interpretability (Section 6.1) ---
+# Used for Gradient SHAP and Feature Importance Plots
+shap==0.43.0
+
+# --- Data Processing & Harmonization (Section 3.3) ---
+# Used for Z-Score Normalization and Min-Max Scaling
+numpy>=1.23.5
+pandas>=1.5.3
+scikit-learn>=1.2.2
+
+# --- Audio Feature Extraction (Section 3.2) ---
+# Required for generating Log-Mel Spectrograms from Coswara/Local audio
+librosa>=0.10.0
+scipy>=1.10.1
+
+# --- Evaluation & Visualization (Section 4.2) ---
+# For AUC-ROC curves, SHAP Beeswarm, and Force plots
+matplotlib>=3.7.1
+seaborn>=0.12.2
+
+# --- Edge Simulation & Profiling (Section 3.5) ---
+# For hardware compute load and latency monitoring
+psutil>=5.9.5
